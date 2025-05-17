@@ -11,6 +11,9 @@ import torch
 import uvicorn
 from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException
 
+from atropos_api.model_utils import chatml_messages_to_prompt
+from atropos_api.schemas import ChatCompletionRequest, GenerateRequest
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -74,10 +77,6 @@ async def generate(
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     logger.info(f"Incoming request: {request}")
-
-    # Import these here to avoid potential circular imports
-    from atropos_api.model_utils import chatml_messages_to_prompt
-    from atropos_api.schemas import ChatCompletionRequest, GenerateRequest
 
     if "messages" in request:
         chat_req = ChatCompletionRequest(**request)
