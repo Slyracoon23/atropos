@@ -43,7 +43,24 @@ class GenerateRequest(BaseModel):
 
 
 class GenerateResponse(BaseModel):
-    completion_ids: List[List[int]]
+    completions: List[str]
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatCompletionRequest(BaseModel):
+    messages: List[ChatMessage]
+    n: int = 1
+    repetition_penalty: float = 1.0
+    temperature: float = 1.0
+    top_p: float = 1.0
+    top_k: int = -1
+    min_p: float = 0.0
+    max_tokens: int = 16
+    guided_decoding_regex: Optional[str] = None
 
 
 def load_model(model_name: str, device: str = "mps"):
@@ -101,50 +118,80 @@ async def health():
     return {"status": "ok"}
 
 
+def chatml_messages_to_prompt(messages: List[ChatMessage], tokenizer) -> str:
+    """Convert a list of ChatML messages to a single prompt string, using the tokenizer's chat template if available."""
+    chat_list = [{"role": m.role, "content": m.content} for m in messages]
+    if hasattr(tokenizer, "apply_chat_template"):
+        return tokenizer.apply_chat_template(
+            chat_list, tokenize=False, add_generation_prompt=True
+        )
+    else:
+        prompt = ""
+        for msg in messages:
+            prompt += f"<|im_start|>{msg.role}\n{msg.content}<|im_end|>\n"
+        prompt += "<|im_start|>assistant\n"
+        return prompt
+
+
 @router.post("/completions", response_model=GenerateResponse)
-async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
-    """Generate completions for the provided prompts."""
+async def generate(
+    request: dict,  # Accept raw dict to support both formats
+    background_tasks: BackgroundTasks,
+):
+    """Generate completions for the provided prompts or messages."""
     if model is None or tokenizer is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
+    # Determine if this is a ChatML-style request or legacy prompt request
+    if "messages" in request:
+        # Parse as ChatML
+        chat_req = ChatCompletionRequest(**request)
+        prompt = chatml_messages_to_prompt(chat_req.messages, tokenizer)
+        n = chat_req.n
+        repetition_penalty = chat_req.repetition_penalty
+        temperature = chat_req.temperature
+        top_p = chat_req.top_p
+        top_k = chat_req.top_k
+        max_tokens = chat_req.max_tokens
+    else:
+        # Legacy prompt-based
+        gen_req = GenerateRequest(**request)
+        # For compatibility, just use the first prompt
+        prompt = gen_req.prompts[0]
+        n = gen_req.n
+        repetition_penalty = gen_req.repetition_penalty
+        temperature = gen_req.temperature
+        top_p = gen_req.top_p
+        top_k = gen_req.top_k
+        max_tokens = gen_req.max_tokens
+
     # Prepare generation config
     gen_config = GenerationConfig(
-        max_new_tokens=request.max_tokens,
-        do_sample=True if request.temperature > 0 else False,
-        temperature=request.temperature,
-        top_p=request.top_p,
-        top_k=request.top_k if request.top_k > 0 else None,
-        repetition_penalty=request.repetition_penalty,
+        max_new_tokens=max_tokens,
+        do_sample=True if temperature > 0 else False,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k if top_k > 0 else None,
+        repetition_penalty=repetition_penalty,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
     )
 
-    all_completion_ids = []
+    all_completions = []
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
+    for _ in range(n):
+        with torch.no_grad():
+            output = model.generate(
+                input_ids,
+                generation_config=gen_config,
+                return_dict_in_generate=True,
+                output_scores=False,
+            )
+        completion_tokens = output.sequences[0, input_ids.shape[1] :].tolist()
+        completion_text = tokenizer.decode(completion_tokens, skip_special_tokens=True)
+        all_completions.append(completion_text)
 
-    # Process each prompt
-    for prompt in request.prompts:
-        prompt_completion_ids = []
-
-        # Tokenize the prompt
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
-
-        # Generate completions
-        for _ in range(request.n):
-            with torch.no_grad():
-                output = model.generate(
-                    input_ids,
-                    generation_config=gen_config,
-                    return_dict_in_generate=True,
-                    output_scores=False,
-                )
-
-            # Extract only the new tokens (remove input)
-            completion_tokens = output.sequences[0, input_ids.shape[1] :].tolist()
-            prompt_completion_ids.append(completion_tokens)
-
-        all_completion_ids.extend(prompt_completion_ids)
-
-    return {"completion_ids": all_completion_ids}
+    return {"completions": all_completions}
 
 
 @router.get("/get_world_size/")
