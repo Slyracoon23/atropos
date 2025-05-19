@@ -187,52 +187,89 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - Based on the legacy command-line DynastAI game
 - Uses Qwen 1.7B from OpenRouter for card generation
 - Built with FastAPI, Uvicorn, and modern web technologies
-## Using with Atropos
 
-To use DynastAI with Atropos for training RL models:
+## Using Custom Card Data
 
-```python
-from atroposlib.envs.base import BaseEnv
-from atroposlib.envs.server_handling.server_baseline import ServerBaseline
-from src.dynastai_env import DynastAIEnv, DynastAIEnvConfig
+DynastAI now supports using custom JSON files with card data. You can specify a custom data file in several ways:
 
-# Create and configure environment
-config = DynastAIEnvConfig(
-    api_host="localhost",
-    api_port=9001,
-    web_ui=True,
-    web_port=3000,
-    openrouter_api_key="your_api_key"
-)
-server_configs = ServerBaseline()
-env = DynastAIEnv(config, server_configs)
+### 1. Using the Run Script
 
-# Use with Atropos training
-observation = await env.reset()
-action = {"session_id": observation["session_id"], "choice": "yes"}
-observation, reward, done, info = await env.step(action)
+The simplest way to use a custom data file is with the `run_dynastai.py` script:
+
+```bash
+python run_dynastai.py --data-file=path/to/your/custom_cards.json
 ```
 
-## Testing
+### 2. Using CLI Parameters
 
-To run the local development server and test the game:
+When running the environment directly:
 
-1. Install dependencies:
+```bash
+python dynastai_server.py serve --env.data_file_path path/to/your/custom_cards.json
+```
+
+### 3. Through the API
+
+You can also specify a data file path when ending a reign through the API:
+
+```python
+import requests
+
+response = requests.post("http://localhost:8000/end_reign", json={
+    "session_id": "your_session_id",
+    "trajectory": [...],
+    "final_metrics": {...},
+    "reign_length": 10,
+    "data_file_path": "path/to/your/custom_cards.json"
+})
+```
+
+## Custom Data File Format
+
+Your custom data file should be a JSON file with the following structure:
+
+```json
+[
+  {
+    "input": {
+      "kingdom_current_state": {
+        "Piety": 50,
+        "Stability": 50,
+        "Power": 50,
+        "Wealth": 50
+      },
+      "choice_history": []
+    },
+    "Character": "Diplomat",
+    "Prompt": "With a sly smile, the diplomat gestures broadly: \"Sire, the lords quarrel like children. Shall we mediate disputes between lords?\"",
+    "Left_Choice": "We cannot risk the kingdom's future; dismiss them with a royal wave.",
+    "Left_Piety": 10,
+    "Left_Stability": -10,
+    "Left_Power": 0,
+    "Left_Wealth": 0,
+    "Right_Choice": "Make it so; our enemies shall kneel in terror!",
+    "Right_Piety": -10,
+    "Right_Stability": 10,
+    "Right_Power": 0,
+    "Right_Wealth": 0,
+    "category": "stability"
+  },
+  // Additional scenarios...
+]
+```
+
+Each card should include the scenario details and optionally can contain input state information.
+
+## Running the Game
+
+1. Start the backend server:
    ```bash
-   pip install -r requirements.txt
+   python run_dynastai.py
    ```
 
-2. Ensure your OpenRouter API key is set in the `.env` file or environment:
-   ```bash
-   export OPENROUTER_API_KEY=your_api_key_here
-   ```
-
-3. Run the local development server:
-   ```bash
-   python dynastai_local_server.py
-   ```
-
-4. Open your browser and navigate to `http://localhost:3000` to play the game
+2. The game will use:
+   - Default card data if no custom file is specified
+   - Custom card data if provided with the `--data-file` parameter
 
 ## Future Enhancements
 

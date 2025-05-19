@@ -109,6 +109,7 @@ class EndReignRequest(BaseModel):
     final_metrics: Dict[str, int]
     reign_length: int
     cause_of_end: Optional[str] = None
+    data_file_path: Optional[str] = None  # Add optional data file path
 
     class Config:
         extra = "ignore"  # Allow extra fields
@@ -278,6 +279,19 @@ async def end_reign(request: EndReignRequest, background_tasks: BackgroundTasks)
         # Update the session with new state
         game_sessions[request.session_id] = new_state
 
+        print(
+            f"[DEBUG] Starting to create rollout file for session {request.session_id}"
+        )
+        # Create rollout file for processing
+        rollout_file_path = create_rollout_file(
+            trajectory=request.trajectory,
+            data_file_path=request.data_file_path,
+            session_id=request.session_id,
+        )
+        print(
+            f"[DEBUG] Created rollout file at {rollout_file_path}, preparing to run subprocess"
+        )
+
         # Execute the dynastai_server.py script in the background
         log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
         os.makedirs(log_dir, exist_ok=True)
@@ -287,6 +301,9 @@ async def end_reign(request: EndReignRequest, background_tasks: BackgroundTasks)
         stderr_file = os.path.join(
             log_dir, f"dynastai_server_stderr_{request.session_id}.log"
         )
+
+        print(f"[DEBUG] Starting subprocess with data file: {rollout_file_path}")
+        print(f"[DEBUG] Logs will be written to {stdout_file} and {stderr_file}")
 
         background_tasks.add_task(
             subprocess.run,
@@ -318,6 +335,8 @@ async def end_reign(request: EndReignRequest, background_tasks: BackgroundTasks)
                 "--env.max_num_workers_per_node=8",
                 "--env.batch_size=-1",
                 "--env.max_token_length=2048",
+                "--env.data_file_path",
+                rollout_file_path,
             ],
             stdout=open(stdout_file, "w"),
             stderr=open(stderr_file, "w"),
@@ -467,3 +486,116 @@ def log_trajectory(request: EndReignRequest, reward: float):
     except Exception as e:
         print(f"Error logging trajectory: {e}")
         # Continue without failing the request
+
+
+def create_rollout_file(
+    trajectory: List[TrajectoryItem],
+    data_file_path: Optional[str] = None,
+    session_id: str = "",
+) -> str:
+    """
+    Create a rollout data file in the format similar to dynastai_cards.json
+
+    Args:
+        trajectory: List of trajectory items
+        data_file_path: Optional path to save the file
+        session_id: Session ID for default filename
+
+    Returns:
+        Path to the created rollout file
+    """
+    print(
+        f"[DEBUG] Starting rollout file creation with {len(trajectory)} trajectory items for session {session_id}"
+    )
+    rollouts_data = []
+    current_metrics = {}
+    choice_history = []
+
+    # Generate rollout data from trajectory
+    for idx, item in enumerate(trajectory):
+        print(
+            f"[DEBUG] Processing trajectory item {idx+1}/{len(trajectory)}: card_id={item.card_id}, choice={item.choice}"
+        )
+        # For the first item, use the initial metrics (subtract the first card's effects)
+        if idx == 0:
+            initial_metrics = {
+                k: v - item.effects.get(k, 0) for k, v in item.post_metrics.items()
+            }
+            current_metrics = {k.capitalize(): v for k, v in initial_metrics.items()}
+            print(f"[DEBUG] Initial metrics: {current_metrics}")
+
+        # Format the entry similar to dynastai_cards.json
+        entry = {
+            "input": {
+                "kingdom_current_state": current_metrics,
+                "choice_history": list(choice_history),  # Make a copy
+            },
+            "output": {
+                "Character": (
+                    item.card_id.split("_")[0] if "_" in item.card_id else "Character"
+                ),
+                "Prompt": item.card_id,  # Using card_id as prompt since actual prompt isn't in trajectory
+                "Left_Choice": "Yes choice",  # Placeholder
+                "Right_Choice": "No choice",  # Placeholder
+                "category": item.category,
+            },
+        }
+
+        # Add effects for both choices (simplified since we only have the chosen effects)
+        if item.choice == "yes":
+            entry["output"]["Left_Piety"] = item.effects.get("piety", 0)
+            entry["output"]["Left_Stability"] = item.effects.get("stability", 0)
+            entry["output"]["Left_Power"] = item.effects.get("power", 0)
+            entry["output"]["Left_Wealth"] = item.effects.get("wealth", 0)
+            # Set opposite effects for the not-chosen option
+            entry["output"]["Right_Piety"] = -item.effects.get("piety", 0)
+            entry["output"]["Right_Stability"] = -item.effects.get("stability", 0)
+            entry["output"]["Right_Power"] = -item.effects.get("power", 0)
+            entry["output"]["Right_Wealth"] = -item.effects.get("wealth", 0)
+        else:
+            entry["output"]["Right_Piety"] = item.effects.get("piety", 0)
+            entry["output"]["Right_Stability"] = item.effects.get("stability", 0)
+            entry["output"]["Right_Power"] = item.effects.get("power", 0)
+            entry["output"]["Right_Wealth"] = item.effects.get("wealth", 0)
+            # Set opposite effects for the not-chosen option
+            entry["output"]["Left_Piety"] = -item.effects.get("piety", 0)
+            entry["output"]["Left_Stability"] = -item.effects.get("stability", 0)
+            entry["output"]["Left_Power"] = -item.effects.get("power", 0)
+            entry["output"]["Left_Wealth"] = -item.effects.get("wealth", 0)
+
+        print(
+            f"[DEBUG] Created entry with character={entry['output']['Character']}, category={entry['output']['category']}"
+        )
+        rollouts_data.append(entry)
+
+        # Update metrics and choice history for next iteration
+        current_metrics = {k.capitalize(): v for k, v in item.post_metrics.items()}
+        choice_history.append(
+            {
+                "Character": entry["output"]["Character"],
+                "Prompt": entry["output"]["Prompt"],
+                "choice_made": "Yes choice" if item.choice == "yes" else "No choice",
+                "effects": item.effects,
+                "category": item.category,
+            }
+        )
+        print(f"[DEBUG] Updated metrics after item {idx+1}: {current_metrics}")
+
+    # Determine the rollout file path
+    rollout_file_path = data_file_path or os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "data",
+        f"dynastai_rollout_{session_id}.json",
+    )
+
+    print(
+        f"[DEBUG] Writing {len(rollouts_data)} entries to rollout file: {rollout_file_path}"
+    )
+
+    # Write rollout data to file
+    os.makedirs(os.path.dirname(rollout_file_path), exist_ok=True)
+    with open(rollout_file_path, "w") as f:
+        json.dump(rollouts_data, f, indent=2)
+
+    print(f"[DEBUG] Successfully wrote rollout file with {len(rollouts_data)} entries")
+    return rollout_file_path
